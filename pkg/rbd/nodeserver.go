@@ -17,7 +17,6 @@ limitations under the License.
 package rbd
 
 import (
-	"fmt"
 	"os"
 	"strings"
 
@@ -41,7 +40,7 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	targetPath := req.GetTargetPath()
 
 	if !strings.HasSuffix(targetPath, "/mount") {
-		return nil, fmt.Errorf("rnd: malformed the value of target path: %s", targetPath)
+		return nil, status.Errorf(codes.Internal, "rbd: malformed the value of target path: %s", targetPath)
 	}
 	s := strings.Split(strings.TrimSuffix(targetPath, "/mount"), "/")
 	volName := s[len(s)-1]
@@ -63,13 +62,15 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	}
 	volOptions, err := getRBDVolumeOptions(req.VolumeAttributes)
 	if err != nil {
-		return nil, err
+		glog.Errorf("failed to get RBD volume options for volume %s: %v", req.GetVolumeId(), err)
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	volOptions.VolName = volName
 	// Mapping RBD image
 	devicePath, err := attachRBDImage(volOptions, req.GetNodePublishSecrets())
 	if err != nil {
-		return nil, err
+		glog.Errorf("failed to attach RBD image for volume %s: %v", req.GetVolumeId(), err)
+		return nil, status.Error(codes.Internal, err.Error())
 	}
 	glog.V(4).Infof("rbd image: %s/%s was succesfully mapped at %s\n", req.GetVolumeId(), volOptions.Pool, devicePath)
 	fsType := req.GetVolumeCapability().GetMount().GetFsType()
@@ -88,7 +89,8 @@ func (ns *nodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 
 	diskMounter := &mount.SafeFormatAndMount{Interface: mount.New(""), Exec: mount.NewOsExec()}
 	if err := diskMounter.FormatAndMount(devicePath, targetPath, fsType, options); err != nil {
-		return nil, err
+		glog.Errorf("failed to format and mount device for volume %s: %v", req.GetVolumeId(), err)
+		return nil, status.Error(codes.Internal, err.Error())
 	}
 
 	return &csi.NodePublishVolumeResponse{}, nil
@@ -108,12 +110,14 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 
 	devicePath, cnt, err := mount.GetDeviceNameFromMount(mounter, targetPath)
 	if err != nil {
+		glog.Errorf("GetDeviceNameFromMount for volume %s failed: %v", req.GetVolumeId(), err)
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
 	// Unmounting the image
 	err = mounter.Unmount(targetPath)
 	if err != nil {
+		glog.Errorf("failed to unmount volume %s: %v", req.GetVolumeId(), err)
 		return nil, status.Error(codes.Internal, err.Error())
 	}
 
@@ -125,7 +129,7 @@ func (ns *nodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpu
 	// Unmapping rbd device
 	if err := detachRBDDevice(devicePath); err != nil {
 		glog.V(3).Infof("failed to unmap rbd device: %s with error: %v", devicePath, err)
-		return nil, err
+		return nil, status.Error(codes.Internal, err.Error())
 	}
 
 	return &csi.NodeUnpublishVolumeResponse{}, nil

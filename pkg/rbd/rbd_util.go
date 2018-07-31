@@ -352,13 +352,13 @@ func loadVolInfo(image string, persistentStoragePath string, volInfo *rbdVolume)
 	file := path.Join(persistentStoragePath, image+".json")
 	fp, err := os.Open(file)
 	if err != nil {
-		return fmt.Errorf("rbd: open err %s/%s", file, err)
+		return fmt.Errorf("rbd: open err %s: %s", file, err)
 	}
 	defer fp.Close()
 
 	decoder := json.NewDecoder(fp)
 	if err = decoder.Decode(volInfo); err != nil {
-		return fmt.Errorf("rbd: decode err: %v.", err)
+		return fmt.Errorf("rbd: decode err: %v", err)
 	}
 
 	return nil

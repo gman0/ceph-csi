@@ -39,8 +39,9 @@ type controllerServer struct {
 
 func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
 	if err := cs.Driver.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
-		glog.V(3).Infof("invalid create volume req: %v", req)
-		return nil, err
+		msg := fmt.Sprintf("invalid create volume req: %v", req)
+		glog.Error(msg)
+		return nil, status.Error(codes.InvalidArgument, msg)
 	}
 	// Check sanity of request Name, Volume Capabilities
 	if len(req.Name) == 0 {
@@ -74,7 +75,8 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 
 	rbdVol, err := getRBDVolumeOptions(req.GetParameters())
 	if err != nil {
-		return nil, err
+		glog.Errorf("failed to get RBD volume options: %v", err)
+		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	// Generating Volume Name and Volume ID, as accoeding to CSI spec they MUST be different
@@ -99,8 +101,8 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	if !found {
 		if err := createRBDImage(rbdVol, volSizeGB, req.GetControllerCreateSecrets()); err != nil {
 			if err != nil {
-				glog.Warningf("failed to create volume: %v", err)
-				return nil, err
+				glog.Errorf("failed to create volume: %v", err)
+				return nil, status.Error(codes.Internal, err.Error())
 			}
 		}
 		glog.V(4).Infof("create volume %s", volName)
@@ -121,27 +123,29 @@ func (cs *controllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 
 func (cs *controllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequest) (*csi.DeleteVolumeResponse, error) {
 	if err := cs.Driver.ValidateControllerServiceRequest(csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME); err != nil {
-		glog.Warningf("invalid delete volume req: %v", req)
-		return nil, err
+		msg := fmt.Sprintf("invalid delete volume req: %v", req)
+		glog.Error(msg)
+		return nil, status.Error(codes.InvalidArgument, msg)
 	}
 	// For now the image get unconditionally deleted, but here retention policy can be checked
 	volumeID := req.GetVolumeId()
 	rbdVol := &rbdVolume{}
 	if err := loadVolInfo(volumeID, path.Join(PluginFolder, "controller"), rbdVol); err != nil {
-		return nil, err
+		glog.Errorf("failed to load volume info for volume %s: %v", req.GetVolumeId(), err)
+		return nil, status.Error(codes.Internal, err.Error())
 	}
 	volName := rbdVol.VolName
 	// Deleting rbd image
 	glog.V(4).Infof("deleting volume %s", volName)
 	if err := deleteRBDImage(rbdVol, req.GetControllerDeleteSecrets()); err != nil {
-		glog.V(3).Infof("failed to delete rbd image: %s/%s with error: %v", rbdVol.Pool, volName, err)
-		return nil, err
+		glog.Errorf("failed to delete rbd image: %s/%s with error: %v", rbdVol.Pool, volName, err)
+		return nil, status.Error(codes.Internal, err.Error())
 	}
 	// Removing persistent storage file for the unmapped volume
 	if err := deleteVolInfo(volumeID, path.Join(PluginFolder, "controller")); err != nil {
-		return nil, err
+		glog.Errorf("failed to delete volume info for volume %s: %v", req.GetVolumeId(), err)
+		return nil, status.Error(codes.Internal, err.Error())
 	}
-
 	delete(rbdVolumes, volumeID)
 	return &csi.DeleteVolumeResponse{}, nil
 }
