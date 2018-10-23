@@ -18,11 +18,13 @@ spec:
       dnsPolicy: ClusterFirstWithHostNet      
       containers:
         - name: driver-registrar
-          image: quay.io/k8scsi/driver-registrar:v0.3.0
+          image: rvasek/driver-registrar:v0.5.0-dirty
           args:
             - "--v=5"
             - "--csi-address=$(ADDRESS)"
+            - "--mode=pluginwatcher-register"
             - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
+            - "--driver-requires-attachment=false"
           env:
             - name: ADDRESS
               value: /var/lib/kubelet/plugins/csi-cephfsplugin/csi.sock
