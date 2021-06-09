@@ -19,61 +19,68 @@ snapshot data.
 ## Use-cases
 
 What's the point of such read-only volumes?
+
 * **Restore snapshots selectively:** users may want to traverse snapshots,
-restoring data to a writable volume more selectively instead of restoring
-the whole snapshot.
+  restoring data to a writable volume more selectively instead of restoring
+  the whole snapshot.
 * **Volume backup:** users can't backup a live volume, they first need
-to snapshot it. Once a snapshot is take, it still can't be backed-up,
-as backup tools usually work with volumes (that are exposed as file-systems)
-and not snapshots (which might have backend-specific format). What this means
-is that in order to create a snapshot backup, users have to clone snapshot data
-twice:
-   1. first time, when restoring the snapshot into a temporary volume from
-   where the data will be read,
-   2. and second time, when transferring that volume into some backup/archive
-   storage (e.g. object store).
-   
-   The temporary backed-up volume will most likely be thrown away after the
-   backup transfer is finished. That's a lot of wasted work for what we
-   originally wanted to do! Having the ability to create volumes from snapshots
-   cheaply would be a big improvement for this use case.
+  to snapshot it. Once a snapshot is take, it still can't be backed-up,
+  as backup tools usually work with volumes (that are exposed as file-systems)
+  and not snapshots (which might have backend-specific format). What this means
+  is that in order to create a snapshot backup, users have to clone snapshot
+  data twice:
+
+  1. first time, when restoring the snapshot into a temporary volume from
+     where the data will be read,
+  1. and second time, when transferring that volume into some backup/archive
+     storage (e.g. object store).
+
+  The temporary backed-up volume will most likely be thrown away after the
+  backup transfer is finished. That's a lot of wasted work for what we
+  originally wanted to do! Having the ability to create volumes from
+  snapshots cheaply would be a big improvement for this use case.
 
 ## Alternatives
 
 * _Snapshots are stored in `<subvolume>/.snap`. Users could simply visit this
-directory by themselves._
-   `.snap` is CephFS-specific detail of how snapshots are exposed.
-   Users / tools may not be aware of this special directory, or it may not fit
-   their workflow. At the moment, the idiomatic way of accessing snapshot
-   contents in CSI drivers is by creating a new volume and populating it
-   with snapshot.
+  directory by themselves._
+
+  `.snap` is CephFS-specific detail of how snapshots are exposed.
+  Users / tools may not be aware of this special directory, or it may not fit
+  their workflow. At the moment, the idiomatic way of accessing snapshot
+  contents in CSI drivers is by creating a new volume and populating it
+  with snapshot.
 
 ## Design
 
 Key points:
+
 * Volume source is a snapshot, volume access mode is `*_READER_ONLY`.
 * No actual new subvolumes are created in CephFS.
 * The resulting volume is a reference to the source subvolume snapshot.
-This reference would be demarked in `Volume.volume_context` map.
+  This reference would be demarked in `Volume.volume_context` map.
 * Mounting such volume means mounting the respective CephFS subvolume
-and exposing the snapshot to workloads.
+  and exposing the snapshot to workloads.
 * Let's call a *shallow read-only volume with a subvolume snapshot
-as its data source* just a *shallow volume* from here on out for brevity.
+  as its data source* just a *shallow volume* from here on out for brevity.
 
 ### Controller operations
 
 Care must be taken when handling life-times of relevant storage resources.
 When a shallow volume is created, what would happen if:
+
 * _Parent subvolume of the snapshot is removed while the shallow volume
-still exists?_
-   This shouldn't be a problem already. The parent volume has either
-   `snapshot-retention` subvol feature in which case its snapshots remain
-   available, or if it doesn't have that feature, it will fail to be deleted
-   because it still has snapshots associated to it.
+  still exists?_
+
+  This shouldn't be a problem already. The parent volume has either
+  `snapshot-retention` subvol feature in which case its snapshots remain
+  available, or if it doesn't have that feature, it will fail to be deleted
+  because it still has snapshots associated to it.
 * _Source snapshot from which the shallow volume originates is removed while
-that shallow volume still exists?_
-   We need to make sure this doesn't happend and some book-keeping
-   is necessary. Ideally we could employ some kind of reference counting.
+  that shallow volume still exists?_
+
+  We need to make sure this doesn't happen and some book-keeping
+  is necessary. Ideally we could employ some kind of reference counting.
 
 #### Reference counting for shallow volumes
 
@@ -94,7 +101,7 @@ reference count reaches zero. Note that this behavior would permit calling
 
 * `DeleteSnapshot`:
   * `refcount == 0` or the respective _refcount_ RADOS object doesn't exist:
-  delete the backing snapshot too.
+    delete the backing snapshot too.
   * `refcount > 0`: keep the backing snapshot.
 * `DeleteVolume`:
   * `refcount == 0`: delete the backing snapshot too.
@@ -103,8 +110,8 @@ reference count reaches zero. Note that this behavior would permit calling
 To enable creating shallow volumes from snapshots that were provisioned by
 older versions of cephfs-csi (i.e. before this feature is introduced),
 `CreateVolume` for shallow volumes would also create the _refcount_ object in
-case it's missing. It would be initialized to two: 1 for the source snapshot
-+ 1 for the newly created shallow volume.
+case it's missing. It would be initialized to two: the source snapshot and the
+newly created shallow volume.
 
 ##### Concurrent access to _refcount_ objects
 
@@ -127,29 +134,33 @@ being aware of the leader election process.
 #### `CreateVolume`
 
 A read-only volume with snapshot source would be created under these conditions:
+
 1. `CreateVolumeRequest.volume_content_source` is a snapshot,
-2. `CreateVolumeRequest.volume_capabilities[*].access_mode` is any of read-only
-volume access modes.
-3. Possibly other volume parameters in `CreateVolumeRequest.parameters`
-specific to shallow volumes.
+1. `CreateVolumeRequest.volume_capabilities[*].access_mode` is any of read-only
+   volume access modes.
+1. Possibly other volume parameters in `CreateVolumeRequest.parameters`
+   specific to shallow volumes.
 
 `CreateVolumeResponse.Volume.volume_context` would then contain necessary
 information to identify the source subvolume / snapshot.
 
 Things to look out for:
+
 * _What's the volume size?_
-   It doesn't consume any space on the filesystem. `Volume.capacity_bytes` is
-   allowed to contain zero. We could use that.
+
+  It doesn't consume any space on the filesystem. `Volume.capacity_bytes` is
+  allowed to contain zero. We could use that.
 * _What should be the requested size when creating the volume (specified e.g.
-in PVC)?_
-   This one is tricky. CSI spec allows for
-   `CreateVolumeRequest.capacity_range.{required_bytes,limit_bytes}` to be
-   zero. On the other hand,
-   `PersistentVolumeClaim.spec.resources.requests.storage` must be bigger than
-   zero. cephfs-csi doesn't care about the requested size (the volume will be
-   read-only, so it has no usable capacity) and would always set it to zero.
-   This shouldn't case any problems for the time being, but still is something
-   we should keep in mind.
+  in PVC)?_
+
+  This one is tricky. CSI spec allows for
+  `CreateVolumeRequest.capacity_range.{required_bytes,limit_bytes}` to be
+  zero. On the other hand,
+  `PersistentVolumeClaim.spec.resources.requests.storage` must be bigger
+  than zero. cephfs-csi doesn't care about the requested size (the volume
+  will be read-only, so it has no usable capacity) and would always set it
+  to zero. This shouldn't case any problems for the time being, but still
+  is something we should keep in mind.
 
 ### `DeleteVolume`
 
@@ -168,9 +179,10 @@ and should be rejected.
 ## Node operations
 
 Two cases need to be considered:
+
 * (a) Volume/snapshot provisioning is handled by cephfs-csi
 * (b) Volume/snapshot provisioning is handled externally (e.g. pre-provisioned
-manually, or by OpenStack Manila, ...)
+  manually, or by OpenStack Manila, ...)
 
 ### `NodeStageVolume`, `NodeUnstageVolume`
 
@@ -185,11 +197,13 @@ whole subvolume first, and only then perform the binds to target paths.
 Subvolume paths are normally retrieved by
 `ceph fs subvolume info/getpath <VOLUME NAME> <SUBVOLUME NAME> <SUBVOLUMEGROUP NAME>`,
 which outputs a path like so:
+
 ```
 /volumes/<VOLUME NAME>/<SUBVOLUME NAME>/<UUID>
 ```
 
 Snapshots are then accessible in:
+
 * `/volumes/<VOLUME NAME>/<SUBVOLUME NAME>/.snap` and
 * `/volumes/<VOLUME NAME>/<SUBVOLUME NAME>/<UUID>/.snap`.
 
@@ -213,7 +227,8 @@ RO volumes.
 
 ### `NodePublishVolume`, `NodeUnpublishVolume`
 
-Node publish is trivial. We bind staging path to target path as a read-only mount.
+Node publish is trivial. We bind staging path to target path as a read-only
+mount.
 
 ### `NodeGetVolumeStats`
 
@@ -226,30 +241,33 @@ volume context parameters will be used to convey necessary information to the
 cephfs-csi driver in order to support shallow volumes.
 
 Volume parameters `CreateVolumeRequest.parameters`:
-*  Should be "shallow" the default mode for all `CreateVolume` calls that have
-(a) snapshot as data source and (b) read-only volume access mode? If not, a new
-volume parameter should be introduced: e.g `isShallow: <bool>`. On the other
-hand, does it even makes sense for users to want to create full copies of
-snapshots and still have them read-only?
+
+* Should be "shallow" the default mode for all `CreateVolume` calls that have
+  (a) snapshot as data source and (b) read-only volume access mode? If not,
+  a new volume parameter should be introduced: e.g `isShallow: <bool>`. On the
+  other hand, does it even makes sense for users to want to create full copies
+  of snapshots and still have them read-only?
 
 Volume context `Volume.volume_context`:
+
 * Here we definitely need `isShallow` or similar. Without it we wouldn't be
-able to distinguish between a regular volume that just happens to have
-a read-only access mode, and a volume that references a snapshot.
+  able to distinguish between a regular volume that just happens to have
+  a read-only access mode, and a volume that references a snapshot.
 * Currently cephfs-csi recognizes `subvolumePath` for dynamically provisioned
-volumes and `rootPath` for pre-previsioned volumes. As mentioned in
-[`NodeStageVolume`, `NodeUnstageVolume` section](#NodeStageVolume-NodeUnstageVolume),
-snapshots cannot be mounted directly. How do we pass in path to the parent
-subvolume?
-   * a) Path to the snapshot is passed in via `subvolumePath` / `rootPath`,
-   e.g. `/volumes/<VOLUME NAME>/<SUBVOLUME NAME>/<UUID>/.snap/<SNAPSHOT NAME>`.
-   From that we can derive path to the subvolume: it's the parent of `.snap`
-   directory.
-   * b) Similar to a), path to the snapshot is passed in via `subvolumePath` /
-   `rootPath`, but instead of trying to derive the right path we introduce
-   another volume context parameter containing path to the parent subvolume
-   explicitly.
-   * c) `subvolumePath` / `rootPath` contains path to the parent subvolume and
-   we introduce another volume context parameter containing name of the
-   snapshot. Path to the snapshot is then formed by appending
-   `/.snap/<SNAPSHOT NAME>` to the subvolume path.
+  volumes and `rootPath` for pre-previsioned volumes. As mentioned in
+  [`NodeStageVolume`, `NodeUnstageVolume` section](#NodeStageVolume-NodeUnstageVolume),
+  snapshots cannot be mounted directly. How do we pass in path to the parent
+  subvolume?
+  * a) Path to the snapshot is passed in via `subvolumePath` / `rootPath`,
+    e.g.
+    `/volumes/<VOLUME NAME>/<SUBVOLUME NAME>/<UUID>/.snap/<SNAPSHOT NAME>`.
+    From that we can derive path to the subvolume: it's the parent of `.snap`
+    directory.
+  * b) Similar to a), path to the snapshot is passed in via `subvolumePath` /
+    `rootPath`, but instead of trying to derive the right path we introduce
+    another volume context parameter containing path to the parent subvolume
+    explicitly.
+  * c) `subvolumePath` / `rootPath` contains path to the parent subvolume and
+    we introduce another volume context parameter containing name of the
+    snapshot. Path to the snapshot is then formed by appending
+    `/.snap/<SNAPSHOT NAME>` to the subvolume path.
