@@ -129,7 +129,8 @@ access resources on the Ceph cluster. Racing on _refcount_ could then cause
 leaking the _refcount_ object itself and/or the subvolume snapshot, or the
 provisioned shallow volume could point to a subvolume snapshot that's already
 been deleted. This is not easily fixable without the individual master replicas
-being aware of the leader election process.
+being aware of the leader election process and is out-of-scope for this
+proposal.
 
 #### `CreateVolume`
 
